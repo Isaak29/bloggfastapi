@@ -355,7 +355,7 @@ async def get_all_blogs():
                     "comments": formatted_comments
                 }
                 all_blogs_decoded.append(blog_data)
-                print(blog_data)
+    
 
         
         return {"all_blogs": all_blogs_decoded}
@@ -456,6 +456,8 @@ async def get_blog(blog_id: str):
             target_blog = None
             user_id = blog.get("user_id")
             user_email = auth.get_user(user_id).email if user_id else None
+            print("user_email",user_email)
+
 
             for blog_data in blog.get("blogs", []):
                 if str(blog_data["_id"]) == blog_id:
