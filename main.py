@@ -18,7 +18,7 @@ firebase_admin.initialize_app(cred)
 app = FastAPI()
 
 # Connect to MongoDB
-mongo_client = AsyncIOMotorClient("mongodb+srv://sanjeev:nikhil8182@cluster0.lh64ymj.mongodb.net/")
+mongo_client = AsyncIOMotorClient("mongodb+srv://BloggOn:Blog123456@cluster0.4tiuxw0.mongodb.net/")
 db = mongo_client['BloggOn']
 blog_collection = db['users'] 
 
@@ -200,7 +200,7 @@ async def save_draft(blog: Blog):
     return {"message": "Draft saved successfully"}
 
 
-
+# 
 
 from bson import ObjectId
 
@@ -828,4 +828,4 @@ async def update_draft(draft_id: str, draft_data: Dict):
 
 if __name__ == '__main__':
     import uvicorn
-    uvicorn.run(app, host="192.168.1.121", port=8005)
+    uvicorn.run(app, host="192.168.1.12", port=8004)
