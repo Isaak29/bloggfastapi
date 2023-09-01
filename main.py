@@ -18,7 +18,7 @@ firebase_admin.initialize_app(cred)
 app = FastAPI()
 
 # Connect to MongoDB
-mongo_client = AsyncIOMotorClient("mongodb+srv://sanjeev:nikhil8182@cluster0.lh64ymj.mongodb.net/")
+mongo_client = AsyncIOMotorClient("mongodb+srv://BloggOn:Blog123456@cluster0.4tiuxw0.mongodb.net/")
 db = mongo_client['BloggOn']
 blog_collection = db['users'] 
 
@@ -135,6 +135,7 @@ class Blog(BaseModel):
     user_id: str
     category: str
     tags: List[str] 
+    summary:str
 
 
 @app.post("/store_blog")
@@ -146,8 +147,10 @@ async def store_blog(blog: Blog):
         "title": blog.title,
         "blog_text": blog.blog_text,
         "category": blog.category,
-        "tags": blog.tags
+        "tags": blog.tags,
+        "summary":blog.summary
     }
+    print(blog_data)
     
 
     # Check if the user has existing blogs
@@ -167,6 +170,32 @@ async def store_blog(blog: Blog):
         await blog_collection.insert_one(user_data)
 
     return {"message": "Blog stored successfully"}
+
+@app.post("/publish_blog/{user_id}/{draft_id}")
+async def publish_blog(user_id: str, draft_id: str):
+    print(f"Received request to publish_blog with user_id={user_id} and draft_id={draft_id}")
+    user_blog = await blog_collection.find_one({"user_id": user_id})
+
+    if user_blog:
+        draft_to_publish = None
+        for blog in user_blog.get("drafts", []):
+            if str(blog["_id"]) == draft_id:
+                draft_to_publish = blog
+                break
+
+        if draft_to_publish:
+            user_blog.setdefault("blogs", []).append(draft_to_publish)
+            user_blog["drafts"].remove(draft_to_publish)
+
+            await blog_collection.update_one(
+                {"user_id": user_id},
+                {"$set": {"blogs": user_blog["blogs"], "drafts": user_blog.get("drafts", [])}}
+            )
+
+            return {"message": "Draft published successfully"}
+    
+    return {"message": "Draft not found"}
+
 
 
 @app.post("/save_draft")
@@ -300,6 +329,8 @@ async def get_all_blogs():
         for user_blog in all_blogs:
             user_id = user_blog.get("user_id")
             user_email = auth.get_user(user_id).email if user_id else None
+            name=user_blog.get("name")
+            print(name)
 
             user_blogs = user_blog.get("blogs", [])
             for blog in user_blogs:
@@ -313,16 +344,18 @@ async def get_all_blogs():
                 blog_data = {
                     "_id": str(blog["_id"]),
                     "user_id":user_id, 
+                    "name":name,
                     "user_email": user_email,
                     "title": blog["title"],
                     "category": blog["category"],
                     "blog_text": blog["blog_text"],
                     "tags":blog["tags"],
-                
+                    "summary":blog["summary"],
                     "likes": formatted_likes,
                     "comments": formatted_comments
                 }
                 all_blogs_decoded.append(blog_data)
+                print(blog_data)
 
         
         return {"all_blogs": all_blogs_decoded}
@@ -752,27 +785,28 @@ async def unbookmark_blog(user_id: str = Form(...), blog_id: str = Form(...)):
 
 from bson import ObjectId
 
-from bson import ObjectId
 
-@app.get("/get_all_drafts")
-async def get_all_drafts():
+from fastapi.encoders import jsonable_encoder
+
+@app.get("/get_all_draft_titles")
+async def get_all_draft_titles(user_id: str):
     try:
-        # Fetch all draft data from the collection
-        drafts = await blog_collection.find({}, {"drafts": 1}).to_list(length=None)
+        user = await blog_collection.find_one({"user_id": user_id})
 
-        # Convert ObjectId to string for each draft
-        for draft in drafts:
-            for draft_data in draft.get("drafts", []):
-                draft_data["_id"] = str(draft_data["_id"])
-
-        # Construct a dictionary with the drafts list
-        print(drafts)
-        response_data = {"drafts": drafts}
-
-        # Return the response dictionary
-        return response_data
+        if user:
+            drafts = user.get("drafts", [])
+            draft_titles = [{"_id": str(draft["_id"]), "title": draft["title"]} for draft in drafts]
+            return {"draft_titles": draft_titles}
+        else:
+            return {"draft_titles": []}
     except Exception as e:
-        return {"error": "Error fetching drafts", "details": str(e)}
+        return {"error": "Error fetching draft titles", "details": str(e)}
+
+
+
+
+
+
 
 
 
@@ -781,6 +815,7 @@ async def get_all_drafts():
 async def get_edit_draft(draft_id: str):
     try:
         draft = await blog_collection.find_one({"drafts._id": ObjectId(draft_id)})
+        print("draft",draft)
 
         if draft:
             target_draft = None
@@ -806,26 +841,9 @@ async def get_edit_draft(draft_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail="Error fetching draft")
 
-@app.post("/update_draft/{draft_id}")
-async def update_draft(draft_id: str, draft_data: Dict):
-    try:
-        # Update the draft data in the collection
-        result = await blog_collection.update_one(
-            {"drafts._id": ObjectId(draft_id)},
-            {"$set": {"drafts.$.title": draft_data["title"], "drafts.$.category": draft_data["category"],
-                      "drafts.$.blog_text": draft_data["blog_text"], "drafts.$.tags": draft_data["tags"]}}
-        )
-
-        if result.modified_count > 0:
-            return {"message": "Draft updated successfully"}
-        else:
-            return {"error": "No changes made to the draft"}
-
-    except Exception as e:
-        return {"error": "Error updating draft", "details": str(e)}
 
 
 
 if __name__ == '__main__':
     import uvicorn
-    uvicorn.run(app, host="192.168.1.121", port=8005)
+    uvicorn.run(app, host="192.168.1.8", port=8005)
