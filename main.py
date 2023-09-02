@@ -229,7 +229,7 @@ async def save_draft(blog: Blog):
     return {"message": "Draft saved successfully"}
 
 
-
+# 
 
 from bson import ObjectId
 
@@ -860,4 +860,4 @@ async def get_edit_draft(draft_id: str):
 
 if __name__ == '__main__':
     import uvicorn
-    uvicorn.run(app, host="192.168.1.8", port=8005)
+    uvicorn.run(app, host="192.168.1.12", port=8004)
