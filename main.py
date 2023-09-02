@@ -388,12 +388,15 @@ otp_tokens = {}
 
 
 
-    
 @app.post('/like_post/{blog_id}')
 async def like_post(blog_id: str, user_id: str = Form(...)):
     try:
+        # Check if blog_id is valid
+        if not ObjectId.is_valid(blog_id):
+            return JSONResponse(content={"message": "Invalid blog_id"}, status_code=400)
+
         # Retrieve the user's email using the user_id from Firebase or your authentication system
-        user_email = auth.get_user(user_id).email # Implement this function to get the user's email
+        user_email = auth.get_user(user_id).email  # Implement this function to get the user's email
 
         blog_id = ObjectId(blog_id)
         result = await blog_collection.update_one(
@@ -406,9 +409,34 @@ async def like_post(blog_id: str, user_id: str = Form(...)):
             blog = await blog_collection.find_one({"blogs._id": blog_id})
             if any(like['user_id'] == user_id for like in blog['blogs'][0]['likes']):
                 return JSONResponse(content={"message": "Post already liked by the user"})
-            raise HTTPException(status_code=400, detail="Failed to like post")
+            return JSONResponse(content={"message": "Failed to like post"}, status_code=400)
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Internal server error")
+        return JSONResponse(content={"message": "Internal server error"}, status_code=500)
+
+
+@app.post('/unlike_post/{blog_id}')
+async def unlike_post(blog_id: str, user_id: str = Form(...)):
+    try:
+        # Check if blog_id is valid
+        if not ObjectId.is_valid(blog_id):
+            return JSONResponse(content={"message": "Invalid blog_id"}, status_code=400)
+
+        blog_id = ObjectId(blog_id)
+
+        result = await blog_collection.update_one(
+            {"blogs._id": blog_id},
+            {"$pull": {"blogs.$.likes": {"user_id": user_id}}}
+        )
+
+        if result.modified_count == 1:
+            return JSONResponse(content={"message": "Post unliked successfully"})
+        else:
+            blog = await blog_collection.find_one({"blogs._id": blog_id})
+            if any(like['user_id'] == user_id for like in blog['blogs'][0]['likes']):
+                return JSONResponse(content={"message": "Post not liked by the user"})
+            return JSONResponse(content={"message": "Failed to unlike post"}, status_code=400)
+    except Exception as e:
+        return JSONResponse(content={"message": "Internal server error"}, status_code=500)
 
 
     
@@ -465,8 +493,10 @@ async def get_blog(blog_id: str):
                     break
 
             if target_blog:
-                formatted_likes = [{"user_id": like["user_id"], "user_email": like["user_email"]} for like in target_blog["likes"]]
-                formatted_comments = [{"user_id": comment["user_id"], "user_email": comment["user_email"], "comment": comment["comment"]} for comment in target_blog["comments"]]
+                likes = blog.get("likes", [])
+                comments = blog.get("comments", [])
+                formatted_likes = [{"user_id": like["user_id"], "user_email": like["user_email"]} for like in likes]
+                formatted_comments = [{"comment_id": str(comment["_id"]), "user_id": comment["user_id"], "user_email": comment["user_email"], "comment": comment["comment"]} for comment in comments]
 
                 blog_data = {
                     "_id": str(target_blog["_id"]),
@@ -687,25 +717,7 @@ async def get_bookmarked_posts(user_id: str):
         return {"error": "Error fetching user blogs", "details": str(e)}
 
 
-@app.post('/unlike_post/{blog_id}')
-async def unlike_post(blog_id: str, user_id: str = Form(...)):
-    try:
-        blog_id = ObjectId(blog_id)
-        
-        result = await blog_collection.update_one(
-            {"blogs._id": blog_id},
-            {"$pull": {"blogs.$.likes": {"user_id": user_id}}}
-        )
-        
-        if result.modified_count == 1:
-            return JSONResponse(content={"message": "Post unliked successfully"})
-        else:
-            blog = await blog_collection.find_one({"blogs._id": blog_id})
-            if any(like['user_id'] == user_id for like in blog['blogs'][0]['likes']):
-                return JSONResponse(content={"message": "Post not liked by the user"})
-            raise HTTPException(status_code=400, detail="Failed to unlike post")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Internal server error")
+
 
 @app.post('/delete_comment/{blog_id}/{comment_id}')
 async def delete_comment(blog_id: str, comment_id: str, user_id: str = Form(...)):
