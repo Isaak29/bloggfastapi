@@ -1,26 +1,55 @@
 import firebase_admin
-from firebase_admin import credentials, auth
+from firebase_admin import credentials, auth, exceptions
 from fastapi import FastAPI, HTTPException, Body,Form, status, UploadFile, File, Path, Request
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel
 from starlette.responses import JSONResponse
 from bson import ObjectId
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Depends
 import logging
 from typing import Dict
 import base64
-from typing import List
-
-
-cred = credentials.Certificate('firebase_keys/serviceAccountKey.json')
-firebase_admin.initialize_app(cred)
+from fastapi.middleware.cors import CORSMiddleware
+from pymongo import DESCENDING
+from typing import List, Dict
+from datetime import datetime, timedelta
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+import smtplib
+import random
+import pyrebase
+import requests
+import random
+import secrets
+import time
 
 app = FastAPI()
+cred = credentials.Certificate('firebase_keys/serviceAccountKey.json')
+firebase_admin.initialize_app(cred)
+auth_admin = auth
+firebaseConfig = {
+  "apiKey": "AIzaSyA29uspF0zLxU61-LAZYC5ozbdHESTglB4",
+  "authDomain": "taskproject-14c55.firebaseapp.com",
+  "databaseURL": "https://taskproject-14c55-default-rtdb.firebaseio.com",
+  "projectId": "taskproject-14c55",
+  "storageBucket": "taskproject-14c55.appspot.com",
+  "messagingSenderId": "1049855100695",
+  "appId": "1:1049855100695:web:a8ae5b9a1236937b849952",
+  "measurementId": "G-CQ0TGWY94L"
+}
+firebase = pyrebase.initialize_app(firebaseConfig)
+
+
+
+
+# Pyrebase authentication
+auth1 = firebase.auth()
 
 # Connect to MongoDB
-mongo_client = AsyncIOMotorClient("mongodb+srv://BloggOn:Blog123456@cluster0.4tiuxw0.mongodb.net/")
+mongo_client = AsyncIOMotorClient("mongodb+srv://isaak:cluster29@bloggon.1uiaxcx.mongodb.net/")
 db = mongo_client['BloggOn']
 blog_collection = db['users'] 
+
 
 class User(BaseModel):
     email: str
@@ -30,22 +59,95 @@ class Paragraph(BaseModel):
     user_id: str
     paragraph: str
 
-@app.post('/register_user')
-async def register_user(name: str = Form(...), email: str = Form(...), password: str = Form(...)):
-    try:
-        # Register user in Firebase using Firebase Admin SDK
-        user = auth.create_user(email=email, password=password)
+# CORS configuration to allow requests from your React frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://192.168.1.12:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
+class User(BaseModel):
+    name:str
+    email:str
+    password:str
+
+class UserCredentials(BaseModel):
+    email: str
+    password: str    
+
+@app.post('/register_user')
+async def register_user(user: User):
+    try:
+        print("userpassword", user.password)
+        print("username", user.name)
+        print("useremail", user.email)
+
+        # Register user in Firebase using Firebase Admin SDK
+        # Note: The user object returned by create_user may not have name attribute.
+        user_firebase = auth_admin.create_user(email=user.email, password=user.password)
+        
+        # The 'user_firebase' object contains information about the created Firebase user.
+        # You may access it as follows:
+        firebase_user_id = user_firebase.uid
+        firebase_user_email = user_firebase.email
+        
+        print("Firebase user ID:", firebase_user_id)
+        print("Firebase user email:", firebase_user_email)
+    
         user_data = {
-            "name": name,
-            "email": email,
-            "user_id": user.uid
+            "name": user.name,  # This may not be present in 'user_firebase'
+            "email": user.email,
+            "user_id": firebase_user_id
         }
+        print("user_data", user_data)
         blog_collection.insert_one(user_data)
 
-        return JSONResponse(content={"message": "User registered successfully", "user_id": user.uid})
+        return JSONResponse(content={"message": "User registered successfully", "user_id": firebase_user_id})
     except Exception as e:
-        raise HTTPException(status_code=400, detail="Registration failed")  
+        print("error",e)
+        raise HTTPException(status_code=400, detail="Registration failed")
+
+
+
+
+
+
+
+@app.post("/verify_login")
+async def verify_login(credentials: UserCredentials):
+    try:
+        # Sign in user with email and password
+        user = auth1.sign_in_with_email_and_password(credentials.email, credentials.password)
+
+        # Get user information from Firebase
+        user_info = auth1.get_account_info(user['idToken'])
+
+        # Extract email and UID
+        user_email = user_info['users'][0]['email']
+
+        # Check if the user with this email exists in Firebase Admin
+        try:
+            print("+++++++++++")
+            user_record = auth_admin.get_user_by_email(credentials.email)
+            user_id = user_record.uid
+            print("user_record",user_record)
+        except auth_admin.UserNotFoundError:
+            print("=======")
+            # If the user does not exist in Firebase Admin, raise a custom exception
+            raise HTTPException(status_code=400, detail="User not found. Please register first.")
+
+        # Return user's email and UID (if available)
+        return {"user_email": user_email, "user_id": user_id}
+    except requests.exceptions.HTTPError as e:
+        # Check if the error is due to wrong password
+        if "INVALID_PASSWORD" in str(e):
+            raise HTTPException(status_code=401, detail="Invalid password")
+        elif "Unauthorized" in str(e):
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        else:
+            raise HTTPException(status_code=401, detail="Authentication failed")
 
 class VerifyOTPRequest(BaseModel):
     email: str
@@ -54,39 +156,87 @@ class VerifyOTPRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     email: str
     new_password: str
+# Dictionary to store OTPs temporarily
+otp_tokens = {}
+
+# Model for request data
 
 
+class VerifyOTPRequest(BaseModel):
+    email: str
+    otp: str
 
-@app.post('/verify_login')
-async def verify_login(email: str = Form(...), password: str = Form(...)):
+# Function to generate a random 6-digit OTP
+def generate_otp():
+    otp = ''.join(secrets.choice('0123456789') for _ in range(6))
+    timestamp = int(time.time())  # Get the current timestamp in seconds
+    otp_with_timestamp = f"{otp}:{timestamp}"
+    return otp_with_timestamp
+
+# Function to send OTP email
+def send_otp_email(email, otp):
     try:
-        # Sign in user using Firebase Auth
-        user = auth.get_user_by_email(email)
-        
-        # Attempt to sign in the user using email and password
-        auth_user = auth.get_user(user.uid)
-        auth_user = auth.update_user(
-            user.uid,
-            password=password,  # Provide the provided password for validation
-        )
-        
-        user_email = auth_user.email
-        return JSONResponse(content={"message": "Login successful", "user_id": auth_user.uid, "user_email": user_email})
-    except auth.AuthError as e:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        sender_email = "akmohamedisaakmuzamil29@gmail.com"  # Replace with your sender email address
+        sender_password = "bxfzvsgiohuungwn"  # Replace with your sender email app password
 
+        subject = "OTP Verification"
+        message = f"Your OTP for verification is: {otp}"
+
+        msg = MIMEMultipart()
+        msg['From'] = sender_email
+        msg['To'] = email
+        msg['Subject'] = subject
+        msg.attach(MIMEText(message, 'plain'))
+
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(sender_email, sender_password)
+        server.sendmail(sender_email, email, msg.as_string())
+        server.quit()
+
+    except Exception as e:
+        print("Error sending OTP email:", e)
+
+class SendOTPRequest(BaseModel):
+    email: str
+# Endpoint to send OTP
+@app.post("/send_otp")
+async def send_otp(request_data: SendOTPRequest):
+    email = request_data.email
+
+    try:
+        # Check if the email exists in Firebase Authentication
+        user = auth.get_user_by_email(email)
+
+        # Generate a new OTP token for the email and store it temporarily
+        otp = generate_otp()
+        otp_tokens[email] = otp
+
+        # Send the OTP email
+        send_otp_email(email, otp)
+
+        return {"message": "OTP sent successfully"}
+    except auth.UserNotFoundError:
+        return {"message": "Email not found in Firebase Authentication"}
+# Endpoint to verify OTP
 @app.post("/verify_otp")
 async def verify_otp(request_data: VerifyOTPRequest):
     email = request_data.email
     entered_otp = request_data.otp
 
-    # Generate a new OTP token for the email and store it temporarily
-    otp_tokens[email] = entered_otp
+    # Check if the OTP token exists in the dictionary
+    if email not in otp_tokens:
+        raise HTTPException(status_code=400, detail="Invalid OTP token")
 
-    # Print the token for debugging
-    print(f"Received OTP verification request for email: {email}, entered OTP: {entered_otp}")
+    # Retrieve the stored OTP
+    stored_otp = otp_tokens[email]
 
-    return {"message": "OTP stored successfully"}
+    # Verify if the entered OTP matches the stored OTP
+    if entered_otp == stored_otp:
+        return {"message": "OTP verified successfully"}
+    else:
+        raise HTTPException(status_code=400, detail="Invalid OTP")
+
 
 @app.post("/reset_password")
 async def reset_password(request_data: ResetPasswordRequest):
@@ -138,6 +288,8 @@ class Blog(BaseModel):
     summary:str
 
 
+from datetime import datetime
+
 @app.post("/store_blog")
 async def store_blog(blog: Blog):
     blog_id = ObjectId()  # Generate a unique ObjectId for the blog post
@@ -148,10 +300,10 @@ async def store_blog(blog: Blog):
         "blog_text": blog.blog_text,
         "category": blog.category,
         "tags": blog.tags,
-        "summary":blog.summary
+        "summary": blog.summary,
+        "created_at": datetime.now(),  # Add the current date and time
+        "user_id": blog.user_id  # Assuming user_id is needed in the document
     }
-    print(blog_data)
-    
 
     # Check if the user has existing blogs
     user_blog = await blog_collection.find_one({"user_id": blog.user_id})
@@ -170,6 +322,7 @@ async def store_blog(blog: Blog):
         await blog_collection.insert_one(user_data)
 
     return {"message": "Blog stored successfully"}
+
 
 @app.post("/publish_blog/{user_id}/{draft_id}")
 async def publish_blog(user_id: str, draft_id: str):
@@ -319,49 +472,98 @@ def convert_object_ids_to_strings(user_blogs):
         blog["_id"] = str(blog["_id"])
     return user_blogs
 
+from datetime import datetime, timezone, timedelta
+import pytz  # Make sure to install the pytz library if you haven't already
+def calculate_timestamp_display(created_at: datetime, user_timezone: str) -> str:
+    # Convert the datetime to the user's time zone
+    user_timezone = pytz.timezone(user_timezone)
+    created_at_local = created_at.astimezone(user_timezone)
+
+    # Calculate the current local time
+    current_local_time = datetime.now(user_timezone)
+
+    # Calculate the time difference
+    time_difference = current_local_time - created_at_local
+
+    # Calculate minutes, hours, and days
+    minutes_difference = int(time_difference.total_seconds() / 60)
+    hours_difference = int(minutes_difference / 60)
+    days_difference = int(hours_difference / 24)
+
+    if minutes_difference < 1:
+        return "Just now"
+    elif minutes_difference < 60:
+        return f"{minutes_difference} minute{'s' if minutes_difference > 1 else ''} ago"
+    elif hours_difference < 24:
+        return f"{hours_difference} hour{'s' if hours_difference > 1 else ''} ago"
+    elif days_difference == 1:
+        return "1 day ago"
+    elif days_difference < 30:
+        return f"{days_difference} days ago"
+    else:
+        return created_at_local.strftime("%m-%d")
+
+
+
+
+
 
 @app.get("/get_all_blogs")
 async def get_all_blogs():
     try:
-        all_blogs = await blog_collection.find().to_list(length=None)
+        all_blogs = await blog_collection.find().sort("created_at", DESCENDING).to_list(length=None)
         all_blogs_decoded = []
 
         for user_blog in all_blogs:
             user_id = user_blog.get("user_id")
             user_email = auth.get_user(user_id).email if user_id else None
-            name=user_blog.get("name")
-            print(name)
-
+            name = user_blog.get("name")
             user_blogs = user_blog.get("blogs", [])
+
             for blog in user_blogs:
+                # Calculate the timestamp display
+                created_at = blog.get("created_at")
+                user_timezone = 'Asia/Kolkata'  # Replace with the user's time zone
+                timestamp_display = calculate_timestamp_display(created_at, user_timezone)
+
                 likes = blog.get("likes", [])
                 comments = blog.get("comments", [])
 
                 formatted_likes = [{"user_id": like["user_id"], "user_email": like["user_email"]} for like in likes]
                 formatted_comments = [{"comment_id": str(comment["_id"]), "user_id": comment["user_id"], "user_email": comment["user_email"], "comment": comment["comment"]} for comment in comments]
 
-                
                 blog_data = {
                     "_id": str(blog["_id"]),
-                    "user_id":user_id, 
-                    "name":name,
+                    "user_id": user_id,
+                    "name": name,
                     "user_email": user_email,
                     "title": blog["title"],
                     "category": blog["category"],
                     "blog_text": blog["blog_text"],
-                    "tags":blog["tags"],
-                    "summary":blog["summary"],
+                    "tags": blog["tags"],
+                    "summary": blog["summary"],
                     "likes": formatted_likes,
-                    "comments": formatted_comments
+                    "comments": formatted_comments,
+                    "timestamp_display": timestamp_display  # Include the timestamp display
                 }
                 all_blogs_decoded.append(blog_data)
-    
 
-        
+        # Print the timestamp_display values for debugging
+        for blog_data in all_blogs_decoded:
+            print(f"Timestamp Display: {blog_data['timestamp_display']}")
+
+        # Sort the blogs by timestamp in descending order (most recent first)
+        all_blogs_decoded.sort(key=lambda x: (
+            0 if "hour" in x['timestamp_display'] else 1, x['timestamp_display']), reverse=False)
+
+        # Print the sorted timestamp_display values for debugging
+        for blog_data in all_blogs_decoded:
+            print(f"Sorted Timestamp Display: {blog_data['timestamp_display']}")
+
         return {"all_blogs": all_blogs_decoded}
     except Exception as e:
         return {"error": "Error fetching all blogs", "details": str(e)}
-    
+
 
 class SubscriptionData(BaseModel):
     user_id: str
@@ -378,7 +580,16 @@ async def subscribe(user_id: str, category: str):
     await blog_collection.update_one({"user_id": user_id}, {"$addToSet": {"subscribed_categories": category}}, upsert=True)
     return {"status": "success"}
 
-  
+@app.post("/follow_tag/{user_id}/{tag}")
+async def follow_tag(user_id: str, tag: str):
+    # Check if the user is already subscribed to the category
+    user = await blog_collection.find_one({"user_id": user_id})
+    if user and tag in user.get("following_tags", []):
+        return {"status": "already_subscribed"}
+
+    # Update the user's subscribed categories in the database
+    await blog_collection.update_one({"user_id": user_id}, {"$addToSet": {"following_tags": tag}}, upsert=True)
+    return {"status": "success"}  
 
 
 
@@ -860,4 +1071,4 @@ async def get_edit_draft(draft_id: str):
 
 if __name__ == '__main__':
     import uvicorn
-    uvicorn.run(app, host="192.168.1.12", port=8004)
+    uvicorn.run(app, host="192.168.1.8", port=8005)
