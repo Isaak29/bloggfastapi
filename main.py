@@ -22,6 +22,11 @@ import requests
 import random
 import secrets
 import time
+from transformers import pipeline
+from gtts import gTTS
+from pydub import AudioSegment
+from io import BytesIO
+from fastapi.responses import StreamingResponse
 
 app = FastAPI()
 cred = credentials.Certificate('firebase_keys/serviceAccountKey.json')
@@ -62,7 +67,7 @@ class Paragraph(BaseModel):
 # CORS configuration to allow requests from your React frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://192.168.1.12:3000"],
+    allow_origins=["http://192.168.1.12:3000",'http://192.168.1.8:3000'],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -169,8 +174,7 @@ class VerifyOTPRequest(BaseModel):
 # Function to generate a random 6-digit OTP
 def generate_otp():
     otp = ''.join(secrets.choice('0123456789') for _ in range(6))
-    timestamp = int(time.time())  # Get the current timestamp in seconds
-    otp_with_timestamp = f"{otp}:{timestamp}"
+    otp_with_timestamp = f"{otp}"
     return otp_with_timestamp
 
 # Function to send OTP email
@@ -199,10 +203,16 @@ def send_otp_email(email, otp):
 
 class SendOTPRequest(BaseModel):
     email: str
+
+class SendOTPResponse(BaseModel):
+    message: str
+    countdown_timestamp: int 
+ 
 # Endpoint to send OTP
 @app.post("/send_otp")
 async def send_otp(request_data: SendOTPRequest):
     email = request_data.email
+    print("email",email)
 
     try:
         # Check if the email exists in Firebase Authentication
@@ -212,13 +222,27 @@ async def send_otp(request_data: SendOTPRequest):
         otp = generate_otp()
         otp_tokens[email] = otp
 
+        # Calculate the current timestamp
+        current_timestamp = int(time.time())
+        countdown_timestamp = current_timestamp + 30
+        print("count",countdown_timestamp)
+
         # Send the OTP email
         send_otp_email(email, otp)
 
-        return {"message": "OTP sent successfully"}
+        response_data = {
+            "message": "OTP sent successfully",
+            "countdown_timestamp": countdown_timestamp  # Include the timestamp in the response
+        }
+
+
+
+        return SendOTPResponse(**response_data)
     except auth.UserNotFoundError:
         return {"message": "Email not found in Firebase Authentication"}
+
 # Endpoint to verify OTP
+
 @app.post("/verify_otp")
 async def verify_otp(request_data: VerifyOTPRequest):
     email = request_data.email
@@ -229,10 +253,11 @@ async def verify_otp(request_data: VerifyOTPRequest):
         raise HTTPException(status_code=400, detail="Invalid OTP token")
 
     # Retrieve the stored OTP
-    stored_otp = otp_tokens[email]
+    stored_otp, timestamp = otp_tokens[email].split(':')
+    current_time = int(time.time())
 
-    # Verify if the entered OTP matches the stored OTP
-    if entered_otp == stored_otp:
+    # Verify if the entered OTP matches the stored OTP and is not expired
+    if entered_otp == stored_otp and (current_time - int(timestamp)) <= 30:
         return {"message": "OTP verified successfully"}
     else:
         raise HTTPException(status_code=400, detail="Invalid OTP")
@@ -255,7 +280,8 @@ async def reset_password(request_data: ResetPasswordRequest):
         # Retrieve the user's UID using the email address
         user = auth.get_user_by_email(email)
         uid = user.uid
-
+         
+        del otp_tokens[email] 
         # Use the UID to update the user's password using Firebase Admin SDK
         auth.update_user(uid=uid, password=new_password)
 
@@ -282,46 +308,60 @@ from bson import ObjectId
 class Blog(BaseModel):
     title: str
     blog_text: str
-    user_id: str
-    category: str
+    user_id:str
+    category:str
     tags: List[str] 
-    summary:str
+
 
 
 from datetime import datetime
 
 @app.post("/store_blog")
 async def store_blog(blog: Blog):
+    print("====")
     blog_id = ObjectId()  # Generate a unique ObjectId for the blog post
 
     blog_data = {
         "_id": blog_id,
         "title": blog.title,
         "blog_text": blog.blog_text,
-        "category": blog.category,
         "tags": blog.tags,
-        "summary": blog.summary,
-        "created_at": datetime.now(),  # Add the current date and time
-        "user_id": blog.user_id  # Assuming user_id is needed in the document
+        "created_at": datetime.now(),
+        "user_id": blog.user_id
     }
+
+    # Summarize the blog text
+    summarizer = pipeline("summarization")
+    summary = summarizer(blog.blog_text, max_length=80, min_length=30, do_sample=False)[0]['summary_text']
+
+    blog_data["summary"] = summary  # Add the summary to the blog data
 
     # Check if the user has existing blogs
     user_blog = await blog_collection.find_one({"user_id": blog.user_id})
     if user_blog:
-        # User already has blogs, add the new blog post to their existing blogs
+        categories = user_blog.get("blogs", {})
+        category_name = blog.category
+
+        if category_name not in categories:
+            categories[category_name] = []
+
+        categories[category_name].append(blog_data)
+
         await blog_collection.update_one(
             {"user_id": blog.user_id},
-            {"$push": {"blogs": blog_data}}
+            {"$set": {"blogs": categories}}
         )
     else:
-        # User doesn't have blogs, create a new user document with the blog post
         user_data = {
             "user_id": blog.user_id,
-            "blogs": [blog_data]
+            "blogs": {
+                blog.category: [blog_data]
+            }
         }
         await blog_collection.insert_one(user_data)
 
     return {"message": "Blog stored successfully"}
+
 
 
 @app.post("/publish_blog/{user_id}/{draft_id}")
@@ -518,35 +558,36 @@ async def get_all_blogs():
             user_id = user_blog.get("user_id")
             user_email = auth.get_user(user_id).email if user_id else None
             name = user_blog.get("name")
-            user_blogs = user_blog.get("blogs", [])
+            user_blogs = user_blog.get("blogs", {})
 
-            for blog in user_blogs:
-                # Calculate the timestamp display
-                created_at = blog.get("created_at")
-                user_timezone = 'Asia/Kolkata'  # Replace with the user's time zone
-                timestamp_display = calculate_timestamp_display(created_at, user_timezone)
+            for category, blogs in user_blogs.items():
+                for blog in blogs:
+                    # Calculate the timestamp display
+                    created_at = blog.get("created_at")
+                    user_timezone = 'Asia/Kolkata'  # Replace with the user's time zone
+                    timestamp_display = calculate_timestamp_display(created_at, user_timezone)
 
-                likes = blog.get("likes", [])
-                comments = blog.get("comments", [])
+                    likes = blog.get("likes", [])
+                    comments = blog.get("comments", [])
 
-                formatted_likes = [{"user_id": like["user_id"], "user_email": like["user_email"]} for like in likes]
-                formatted_comments = [{"comment_id": str(comment["_id"]), "user_id": comment["user_id"], "user_email": comment["user_email"], "comment": comment["comment"]} for comment in comments]
+                    formatted_likes = [{"user_id": like["user_id"], "user_email": like["user_email"]} for like in likes]
+                    formatted_comments = [{"comment_id": str(comment["_id"]), "user_id": comment["user_id"], "user_email": comment["user_email"], "comment": comment["comment"]} for comment in comments]
 
-                blog_data = {
-                    "_id": str(blog["_id"]),
-                    "user_id": user_id,
-                    "name": name,
-                    "user_email": user_email,
-                    "title": blog["title"],
-                    "category": blog["category"],
-                    "blog_text": blog["blog_text"],
-                    "tags": blog["tags"],
-                    "summary": blog["summary"],
-                    "likes": formatted_likes,
-                    "comments": formatted_comments,
-                    "timestamp_display": timestamp_display  # Include the timestamp display
-                }
-                all_blogs_decoded.append(blog_data)
+                    blog_data = {
+                        "_id": str(blog["_id"]),
+                        "user_id": user_id,
+                        "name": name,
+                        "user_email": user_email,
+                        "title": blog["title"],
+                        "category": category,  # Use the category as the key
+                        "blog_text": blog["blog_text"],
+                        "tags": blog["tags"],
+                        "summary": blog["summary"],
+                        "likes": formatted_likes,
+                        "comments": formatted_comments,
+                        "timestamp_display": timestamp_display  # Include the timestamp display
+                    }
+                    all_blogs_decoded.append(blog_data)
 
         # Print the timestamp_display values for debugging
         for blog_data in all_blogs_decoded:
@@ -1066,9 +1107,90 @@ async def get_edit_draft(draft_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail="Error fetching draft")
 
+class TextToSpeechRequest(BaseModel):
+    blog_text: str
+    language: str
+    voice: str
+
+@app.post("/get_blog_audio", response_class=StreamingResponse)
+async def get_blog_audio(request_data: TextToSpeechRequest):
+    try:
+        # Create a gTTS instance with the desired language and voice
+        tts = gTTS(
+            text=request_data.blog_text,
+            lang=request_data.language,
+            tld=request_data.voice,
+            slow=False,
+            lang_check=False,
+        )
+
+        # Convert the gTTS audio to an MP3 file in memory
+        audio_bytes = BytesIO()
+        tts.write_to_fp(audio_bytes)
+
+        # Seek to the beginning of the audio file
+        audio_bytes.seek(0)
+
+        # Return the MP3 audio data as a response
+        return StreamingResponse(content=audio_bytes, media_type="audio/mpeg")
+    except Exception as e:
+        return {"error": "Error generating speech", "details": str(e)}
+
+
+@app.get("/get_blogs_by_category")
+async def get_blogs_by_category(category: str = Query(..., description="Category to filter blogs")):
+    try:
+        all_blogs = await blog_collection.find().sort("created_at", DESCENDING).to_list(length=None)
+        all_blogs_decoded = []
+
+        for user_blog in all_blogs:
+            user_id = user_blog.get("user_id")
+            user_email = auth.get_user(user_id).email if user_id else None
+            name = user_blog.get("name")
+            user_blogs = user_blog.get("blogs", {})
+
+            for category, blogs in user_blogs.items():
+                for blog in blogs:
+                    # Calculate the timestamp display
+                    created_at = blog.get("created_at")
+                    user_timezone = 'Asia/Kolkata'  # Replace with the user's time zone
+                    timestamp_display = calculate_timestamp_display(created_at, user_timezone)
+
+                    likes = blog.get("likes", [])
+                    comments = blog.get("comments", [])
+
+                    formatted_likes = [{"user_id": like["user_id"], "user_email": like["user_email"]} for like in likes]
+                    formatted_comments = [{"comment_id": str(comment["_id"]), "user_id": comment["user_id"], "user_email": comment["user_email"], "comment": comment["comment"]} for comment in comments]
+
+                    blog_data = {
+                        "_id": str(blog["_id"]),
+                        "user_id": user_id,
+                        "name": name,
+                        "user_email": user_email,
+                        "title": blog["title"],
+                        "category": category,  # Use the category as the key
+                        "blog_text": blog["blog_text"],
+                        "tags": blog["tags"],
+                        "summary": blog["summary"],
+                        "likes": formatted_likes,
+                        "comments": formatted_comments,
+                        "timestamp_display": timestamp_display  # Include the timestamp display
+                    }
+
+                    # Check if the blog's category matches the requested category
+                    if blog_data["category"] == category:
+                        all_blogs_decoded.append(blog_data)
+
+        # Sort the filtered blogs by timestamp in descending order (most recent first)
+        all_blogs_decoded.sort(key=lambda x: (
+            0 if "hour" in x['timestamp_display'] else 1, x['timestamp_display']), reverse=False)
+
+        return {"blogs_by_category": all_blogs_decoded}
+    except Exception as e:
+        return {"error": "Error fetching blogs by category", "details": str(e)}
 
 
 
 if __name__ == '__main__':
     import uvicorn
-    uvicorn.run(app, host="192.168.1.12", port=8000)
+    uvicorn.run(app, host="192.168.1.8", port=8000)
